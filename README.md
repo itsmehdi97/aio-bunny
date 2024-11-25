@@ -84,6 +84,33 @@ if __name__ == "__main__":
     loop.create_task(main())
     loop.run_forever()
 ```
+And the following shows how to set up a publisher:
+``` python
+import asyncio
+
+from aio_bunny import Bunny, Message
+
+
+async def main():
+    bunny = Bunny("amqp://guest:guest@127.0.0.1/")
+    await bunny.connect()
+
+    # init a new publisher instance
+    publisher = bunny.publisher(
+        "exchange_name",
+        exchange_type=RabbitExchangeType.DIRECT,
+        exchange_durable=True)
+
+    # publish a message
+    await publisher.publish(Message("some message!"), routing_key="key")
+
+
+
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.create_task(main())
+    loop.run_forever()
+```
 ## Versioning
 This software follows [Semantic Versioning](https://semver.org/)
 ### Development
