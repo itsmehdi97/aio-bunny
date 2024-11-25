@@ -1,11 +1,15 @@
-author_info = (("Mehdi Kamani", "itsmehdi97@gmail.com"),)
+author_info = (
+    ("Author", "mkamani@sheypoor.com"),)
 
-package_info = "asyncio compatible wraper around the aio-pika for consumining messages."
+package_info = """
+An asyncio wrapper around aio-pika.
+Provides simplified API, graceful consumer shutdown and optional idempotency.
+"""
 package_license = "MIT License"
 
-team_email = "itsmehdi97@gmail.com"
+team_email = ""
 
-version_info = (0, 0, 4)
+version_info = (0, 0, 7)
 
 __author__ = ", ".join("{} <{}>".format(*info) for info in author_info)
 __version__ = ".".join(map(str, version_info))

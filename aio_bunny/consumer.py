@@ -1,100 +1,121 @@
-import abc
 import asyncio
-import logging
-import functools
-from typing import List, Callable, TypeVar
+from typing import Optional, Callable, Any, TypeAlias, Dict, List
 
-import aio_pika
 from aio_pika.abc import (
     AbstractIncomingMessage,
-    AbstractConnection
+    AbstractConnection,
+    AbstractQueue,
+    AbstractChannel,
 )
 
-from .handler import Handler
+from .exchange_types import RabbitExchangeType
+from .log import get_logger
 
 
-_log = logging.getLogger(__name__)
+log = get_logger(__name__)
+Arguments: TypeAlias = Dict[str, str | int | None]
 
 
-class BaseConsumer(metaclass=abc.ABCMeta):
-    _handlers: List[Handler]
-    _conn: AbstractConnection
-
+class Consumer:
     def __init__(
         self,
-        amqp_url: str,
-        queue: str = None,
-        exchange: str = None,
-        binding_key: str = None,
-    ):
-        self.url = amqp_url
+        callback: Callable[[AbstractIncomingMessage], Any],
+        queue: str,
+        exchange: str,
+        exchange_type: RabbitExchangeType,
+        routing_key: str,
+        prefetch_count: Optional[int] = None,
+        auto_ack: bool = False,
+        arguments: Optional[Arguments] = None,
 
-        self._queue = queue
-        self._exchange = exchange
-        self._binding_key = binding_key
+        queue_durable: bool = False,
+        queue_auto_delete: bool = False,
+        queue_passive: bool = False,
+        queue_exclusive: bool = False,
+        queue_arguments: Optional[Arguments] = None,
 
-        self._handlers = []
-        self._stopped = False
+        exchange_durable: bool = False,
+        exchange_auto_delete: bool = False,
+        exchange_internal: bool = False,
+        exchange_passive: bool = False,
+        exchange_arguments: Optional[Arguments] = None,
+    ) -> None:
 
-    def message_handler(
-        self,
-        queue: str = None,
-        exchange: str = None,
-        binding_key: str = None,
-        prefetch_count: int = 1
-    ) -> Callable:
-        T = TypeVar("T")
+        self.cb = callback
+        self.queue_name = queue
+        self.exchange_name = exchange
+        self.exchange_type = exchange_type.value
+        self.routing_key = routing_key
+        self.prefetch_count = prefetch_count
+        self.auto_ack = auto_ack
+        self.arguments = arguments
 
-        def decorator(func: Callable[[AbstractIncomingMessage], T]) -> Callable:
-            self._handlers.append(
-                Handler(
-                    func,
-                    queue=queue or self._queue,
-                    exchange=exchange or self._exchange,
-                    binding_key=binding_key or self._binding_key,
-                    prefetch_count=prefetch_count))
+        self._queue_args = {
+            'durable': queue_durable,
+            'auto_delete': queue_auto_delete,
+            'passive': queue_passive,
+            'exclusive': queue_exclusive,
+            'arguments': queue_arguments,
+        }
+        self._exchange_args = {
+            'durable': exchange_durable,
+            'auto_delete': exchange_auto_delete,
+            'internal': exchange_internal,
+            'passive': exchange_passive,
+            'arguments': exchange_arguments,
+        }
 
-            @functools.wraps(func)
-            def _decorator(msg: AbstractIncomingMessage) -> T:
-                return func(msg)
-            return _decorator
-        return decorator
+        self.consumer_tag: str = ""
+        self._queue: Optional[AbstractQueue] = None
 
-    @abc.abstractclassmethod
-    async def start(self) -> None:
-        pass
+    async def setup(self, channel: AbstractChannel) -> AbstractQueue:
+        if self.prefetch_count:
+            await channel.set_qos(self.prefetch_count)
 
-    @abc.abstractclassmethod
-    async def stop(self) -> None:
-        pass
+        exchange = await channel.declare_exchange(
+            self.exchange_name,
+            self.exchange_type,
+            **self._exchange_args)  # type: ignore
+        queue = await channel.declare_queue(
+            self.queue_name,
+            **self._queue_args)  # type: ignore
+        await queue.bind(exchange, self.routing_key)
 
+        return queue
 
-class Consumer(BaseConsumer):
-    async def start(self) -> None:
-        self._conn = await self._connect()
-        _log.debug("waiting for messages...")
+    async def _wrapped_callback(self, msg: AbstractIncomingMessage) -> Any:
+        async with msg.process():
+            return await self.cb(msg)
 
-        [await handler.start(self._conn)
-            for handler in self._handlers]
+    async def start(self, conn: AbstractConnection) -> str:
+        channel = await conn.channel()
+        self._queue = await self.setup(channel)
 
-        self._stopped = False
+        self._running_tasks: set = set()
 
-    async def stop(self, timeout: int =None, nowait: bool = False) -> None:
-        if self._stopped:
-            return
+        log.debug("Start to consuming queue: %s", self.queue_name)
+        async with self._queue.iterator(
+            no_ack=self.auto_ack, arguments=self.arguments
+        ) as queue_iterator:
+            self.consumer_tag = queue_iterator._consumer_tag
 
-        _log.debug(f"# stopping {len(self._handlers)} handlers...")
+            async for msg in queue_iterator:
+                task = asyncio.create_task(self._wrapped_callback(msg))
+                task.add_done_callback(self._running_tasks.discard)
+                self._running_tasks.add(task)
 
-        await asyncio.gather(
-            *[handler.stop(timeout=timeout, nowait=nowait)
-                for handler in self._handlers])
-        await self._conn.close()
+        return self.consumer_tag
 
-        self._stopped = True
+    async def stop(
+        self, timeout: Optional[int] = None, nowait: bool = False
+    ) -> List[Exception | None]:
+        if not self._queue:
+            log.debug("Consumer object has not been started correctly.")
+            return []
 
-    async def _connect(self) -> AbstractConnection:
-        _log.debug(f"# connecting to {self.url}")
-        return await aio_pika.connect_robust(self.url)
+        await self._queue.cancel(
+            self.consumer_tag, timeout=timeout, nowait=nowait)
 
-    def __del__(self) -> None:
-        _log.debug('consumer deleted.')
+        log.debug("Consumer %s canceled. Waiting for tasks to finish.", self.consumer_tag)
+
+        return await asyncio.gather(*self._running_tasks, return_exceptions=True)

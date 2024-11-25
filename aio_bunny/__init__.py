@@ -1,21 +1,14 @@
+from aio_pika import Message, IncomingMessage
+
+from .bunny import Bunny
 from .consumer import Consumer
-from .exceptions import AMQPChannelError, ExchangeNotFound
-from .handler import Handler
-from .version import (
-    __author__, __version__, author_info, package_info, package_license,
-    version_info
-)
+from .exchange_types import RabbitExchangeType
 
 
 __all__ = (
-    "__author__",
-    "__version__",
-    "author_info",
-    "AMQPChannelError",
+    "Bunny",
     "Consumer",
-    "ExchangeNotFound",
-    "Handler",
-    "package_info",
-    "package_license",
-    "version_info",
+    "RabbitExchangeType",
+    "Message",
+    "IncomingMessage",
 )
